@@ -32,6 +32,8 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
   const sourcesRef = useRef(new Set<AudioBufferSourceNode>());
   const sessionRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
 
   const encode = (bytes: Uint8Array) => {
     let binary = '';
@@ -76,8 +78,17 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
         try { sessionRef.current.close(); } catch(e) {}
         sessionRef.current = null;
     }
+    if (sourceNodeRef.current) {
+      sourceNodeRef.current.disconnect();
+      sourceNodeRef.current = null;
+    }
+    if (scriptProcessorRef.current) {
+      scriptProcessorRef.current.disconnect();
+      scriptProcessorRef.current = null;
+    }
     if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
     }
     setIsActive(false);
     setIsConnecting(false);
@@ -121,9 +132,12 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
             setIsActive(true);
             
             const source = inputCtx.createMediaStreamSource(stream);
+            sourceNodeRef.current = source;
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
+            scriptProcessorRef.current = scriptProcessor;
             
             scriptProcessor.onaudioprocess = (e) => {
+              if (!sessionRef.current) return;
               const inputData = e.inputBuffer.getChannelData(0);
               const l = inputData.length;
               const int16 = new Int16Array(l);
@@ -136,11 +150,14 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
               };
               
               sessionPromise.then((session) => {
-                if (session) session.sendRealtimeInput({ media: pcmBlob });
-              }).catch(err => {
-                console.error("Session input error:", err);
-                setError("Network error: Failed to stream audio.");
-              });
+                if (session && sessionRef.current) {
+                  try {
+                    session.sendRealtimeInput({ media: pcmBlob });
+                  } catch (err) {
+                    console.warn("Failed to send realtime input:", err);
+                  }
+                }
+              }).catch(() => {});
             };
             
             source.connect(scriptProcessor);
@@ -205,7 +222,7 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
           },
           onerror: (e) => {
             console.error("Live session error:", e);
-            setError("A network error occurred. Please check your internet connection and try again.");
+            setError("Network connection lost. Please restart the test.");
             stopTest();
           },
           onclose: () => stopTest()
@@ -217,24 +234,22 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } }
           },
-          systemInstruction: `You are a British Council IELTS Examiner. 
-          Conduct a full Speaking test using these UNIQUE topics:
-          PART 1 QUESTIONS: ${uniqueTopic.part1.join(', ')}
-          PART 2 CUE CARD: ${uniqueTopic.part2.prompt}. Bullet points: ${uniqueTopic.part2.bulletPoints.join(', ')}.
-          PART 3 QUESTIONS: ${uniqueTopic.part3.join(', ')}
+          systemInstruction: `You are a British Council IELTS Examiner. Be professional, direct, and efficient.
+          Conduct a Speaking test with these topics:
+          PART 1: ${uniqueTopic.part1.join(', ')}
+          PART 2: ${uniqueTopic.part2.prompt}. Bullets: ${uniqueTopic.part2.bulletPoints.join(', ')}.
+          PART 3: ${uniqueTopic.part3.join(', ')}
 
-          Part 2 Instructions: Explicitly tell the candidate they have ONE MINUTE TO PREPARE. 
-          You will see a timer on screen, so after that minute, ask them to start speaking.
-
-          Provide 'Instant Corrections' only for major grammatical errors.
-          At the end, say 'This concludes the test' and provide a predicted Band Score clearly.`
+          Part 2: Explicitly grant 1 minute to prepare.
+          Be concise and do not repeat user answers.
+          End with 'This concludes the test' and a predicted Band Score.`
         }
       });
       
       sessionRef.current = await sessionPromise;
     } catch (err) {
       console.error("Speaking session init error:", err);
-      setError("Failed to start session. This is often a network or API key issue.");
+      setError("Failed to initialize session. Check your connection.");
       setIsConnecting(false);
     }
   };
