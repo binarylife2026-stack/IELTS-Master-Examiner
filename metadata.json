@@ -1,0 +1,7 @@
+{
+  "name": "IELTS Master Examiner",
+  "description": "A comprehensive IELTS preparation platform featuring AI-powered Speaking, Writing, Reading, and Listening modules with professional British Council-style feedback.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
