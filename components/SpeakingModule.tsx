@@ -19,7 +19,7 @@ const VOICES: { name: VoiceName, desc: string }[] = [
 
 const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isActive, setIsActive] = useState(false);
+  const [isActiveState, setIsActiveState] = useState(false);
   const [transcriptions, setTranscriptions] = useState<{role: 'Examiner' | 'Candidate', text: string}[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedVoice, setSelectedVoice] = useState<VoiceName>('Kore');
@@ -33,7 +33,7 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
   const sessionRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const isActiveRef = useRef(false);
 
   const encode = (bytes: Uint8Array) => {
     let binary = '';
@@ -74,23 +74,21 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
   };
 
   const stopTest = useCallback(() => {
+    isActiveRef.current = false;
+    setIsActiveState(false);
+    
     if (sessionRef.current) {
-        try { sessionRef.current.close(); } catch(e) {}
-        sessionRef.current = null;
-    }
-    if (sourceNodeRef.current) {
-      sourceNodeRef.current.disconnect();
-      sourceNodeRef.current = null;
+      try { sessionRef.current.close(); } catch(e) {}
+      sessionRef.current = null;
     }
     if (scriptProcessorRef.current) {
       scriptProcessorRef.current.disconnect();
       scriptProcessorRef.current = null;
     }
     if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
-    setIsActive(false);
     setIsConnecting(false);
     setPrepTime(null);
   }, []);
@@ -104,6 +102,10 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
     }
     return () => clearTimeout(timer);
   }, [prepTime]);
+
+  useEffect(() => {
+    return () => stopTest();
+  }, [stopTest]);
 
   const startTest = async () => {
     setIsConnecting(true);
@@ -121,6 +123,10 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
       audioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
+      // Resume context for browsers that auto-suspend
+      if (inputCtx.state === 'suspended') await inputCtx.resume();
+      if (outputCtx.state === 'suspended') await outputCtx.resume();
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
@@ -129,15 +135,16 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
         callbacks: {
           onopen: () => {
             setIsConnecting(false);
-            setIsActive(true);
+            setIsActiveState(true);
+            isActiveRef.current = true;
             
             const source = inputCtx.createMediaStreamSource(stream);
-            sourceNodeRef.current = source;
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
             scriptProcessorRef.current = scriptProcessor;
             
             scriptProcessor.onaudioprocess = (e) => {
-              if (!sessionRef.current) return;
+              if (!isActiveRef.current || !sessionRef.current) return;
+              
               const inputData = e.inputBuffer.getChannelData(0);
               const l = inputData.length;
               const int16 = new Int16Array(l);
@@ -149,15 +156,11 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
                 mimeType: 'audio/pcm;rate=16000',
               };
               
-              sessionPromise.then((session) => {
-                if (session && sessionRef.current) {
-                  try {
-                    session.sendRealtimeInput({ media: pcmBlob });
-                  } catch (err) {
-                    console.warn("Failed to send realtime input:", err);
-                  }
-                }
-              }).catch(() => {});
+              try {
+                sessionRef.current.sendRealtimeInput({ media: pcmBlob });
+              } catch (err) {
+                console.warn("Input stream failed to send.");
+              }
             };
             
             source.connect(scriptProcessor);
@@ -166,22 +169,18 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
           onmessage: async (message: LiveServerMessage) => {
             if (message.serverContent?.outputTranscription) {
               const text = message.serverContent.outputTranscription.text;
-              
               if (text.toLowerCase().includes('one minute to think') || text.toLowerCase().includes('one minute to prepare')) {
                 setPrepTime(60);
               }
-
               setTranscriptions(prev => {
                 const last = prev[prev.length - 1];
                 if (last && last.role === 'Examiner') {
-                    const newText = last.text + text;
-                    if (newText.toLowerCase().includes('concludes the test')) {
-                        const bandMatch = newText.match(/band\s+(\d(\.\d)?)/i);
-                        if (bandMatch) {
-                            saveResult({ module: 'speaking', score: parseFloat(bandMatch[1]) });
-                        }
-                    }
-                    return [...prev.slice(0, -1), { ...last, text: newText }];
+                  const newText = last.text + text;
+                  if (newText.toLowerCase().includes('concludes the test')) {
+                    const bandMatch = newText.match(/band\s+(\d(\.\d)?)/i);
+                    if (bandMatch) saveResult({ module: 'speaking', score: parseFloat(bandMatch[1]) });
+                  }
+                  return [...prev.slice(0, -1), { ...last, text: newText }];
                 }
                 return [...prev, { role: 'Examiner', text }];
               });
@@ -190,7 +189,7 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
               setTranscriptions(prev => {
                 const last = prev[prev.length - 1];
                 if (last && last.role === 'Candidate') {
-                    return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+                  return [...prev.slice(0, -1), { ...last, text: last.text + text }];
                 }
                 return [...prev, { role: 'Candidate', text }];
               });
@@ -210,7 +209,7 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
                 nextStartTimeRef.current += audioBuffer.duration;
                 sourcesRef.current.add(source);
               } catch (e) {
-                console.warn("Audio decoding error:", e);
+                console.warn("Audio buffer error:", e);
               }
             }
 
@@ -221,8 +220,7 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
             }
           },
           onerror: (e) => {
-            console.error("Live session error:", e);
-            setError("Network connection lost. Please restart the test.");
+            setError("Session interrupted. Try again.");
             stopTest();
           },
           onclose: () => stopTest()
@@ -234,22 +232,18 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } }
           },
-          systemInstruction: `You are a British Council IELTS Examiner. Be professional, direct, and efficient.
-          Conduct a Speaking test with these topics:
-          PART 1: ${uniqueTopic.part1.join(', ')}
-          PART 2: ${uniqueTopic.part2.prompt}. Bullets: ${uniqueTopic.part2.bulletPoints.join(', ')}.
-          PART 3: ${uniqueTopic.part3.join(', ')}
-
-          Part 2: Explicitly grant 1 minute to prepare.
-          Be concise and do not repeat user answers.
-          End with 'This concludes the test' and a predicted Band Score.`
+          systemInstruction: `You are a professional IELTS Examiner. Be brief. Minimize latency.
+          Topics:
+          Part 1: ${uniqueTopic.part1.join(', ')}
+          Part 2: ${uniqueTopic.part2.prompt}
+          Part 3: ${uniqueTopic.part3.join(', ')}
+          Ask one question at a time. Do not repeat candidate answers.`
         }
       });
       
       sessionRef.current = await sessionPromise;
     } catch (err) {
-      console.error("Speaking session init error:", err);
-      setError("Failed to initialize session. Check your connection.");
+      setError("Network error. Please refresh and try again.");
       setIsConnecting(false);
     }
   };
@@ -270,7 +264,7 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
       </div>
 
       <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-100 overflow-hidden min-h-[600px] flex flex-col">
-        {isActive ? (
+        {isActiveState ? (
           <div className="flex-1 flex flex-col p-8 space-y-6">
             <div className="flex justify-between items-center pb-6 border-b border-slate-50">
               <div className="flex items-center space-x-3">
@@ -382,7 +376,7 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
-                      <span className="uppercase">Connection Error</span>
+                      <span className="uppercase">Error</span>
                     </div>
                     {error}
                 </div>
@@ -396,7 +390,7 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
               {isConnecting ? (
                   <>
                     <div className="w-5 h-5 border-3 border-white border-t-transparent rounded-full animate-spin"></div>
-                    <span className="uppercase tracking-widest text-sm">Initializing AI...</span>
+                    <span className="uppercase tracking-widest text-sm">Wait...</span>
                   </>
               ) : (
                   <>
@@ -407,7 +401,6 @@ const SpeakingModule: React.FC<SpeakingModuleProps> = ({ onBack }) => {
                   </>
               )}
             </button>
-            <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.2em]">Topic variety ensured by unique AI seeding</p>
           </div>
         )}
       </div>

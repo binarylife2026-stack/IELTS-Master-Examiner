@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
 import { VoiceName } from '../types';
 
@@ -17,7 +17,7 @@ const VOICES: { name: VoiceName, desc: string }[] = [
 
 const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isActive, setIsActive] = useState(false);
+  const [isActiveState, setIsActiveState] = useState(false);
   const [transcriptions, setTranscriptions] = useState<{role: 'Companion' | 'You', text: string}[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedVoice, setSelectedVoice] = useState<VoiceName>('Charon');
@@ -29,7 +29,7 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
   const sessionRef = useRef<any>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const isActiveRef = useRef(false);
 
   const encode = (bytes: Uint8Array) => {
     let binary = '';
@@ -70,13 +70,11 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
   };
 
   const stopChat = useCallback(() => {
+    isActiveRef.current = false;
+    setIsActiveState(false);
     if (sessionRef.current) {
         try { sessionRef.current.close(); } catch(e) {}
         sessionRef.current = null;
-    }
-    if (sourceNodeRef.current) {
-      sourceNodeRef.current.disconnect();
-      sourceNodeRef.current = null;
     }
     if (scriptProcessorRef.current) {
       scriptProcessorRef.current.disconnect();
@@ -86,9 +84,12 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
     }
-    setIsActive(false);
     setIsConnecting(false);
   }, []);
+
+  useEffect(() => {
+    return () => stopChat();
+  }, [stopChat]);
 
   const startChat = async () => {
     setIsConnecting(true);
@@ -103,6 +104,9 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
       audioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
 
+      if (inputCtx.state === 'suspended') await inputCtx.resume();
+      if (outputCtx.state === 'suspended') await outputCtx.resume();
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
@@ -111,15 +115,15 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
         callbacks: {
           onopen: () => {
             setIsConnecting(false);
-            setIsActive(true);
+            setIsActiveState(true);
+            isActiveRef.current = true;
             
             const source = inputCtx.createMediaStreamSource(stream);
-            sourceNodeRef.current = source;
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
             scriptProcessorRef.current = scriptProcessor;
             
             scriptProcessor.onaudioprocess = (e) => {
-              if (!sessionRef.current) return;
+              if (!isActiveRef.current || !sessionRef.current) return;
               const inputData = e.inputBuffer.getChannelData(0);
               const l = inputData.length;
               const int16 = new Int16Array(l);
@@ -131,15 +135,11 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
                 mimeType: 'audio/pcm;rate=16000',
               };
               
-              sessionPromise.then((session) => {
-                if (session && sessionRef.current) {
-                  try {
-                    session.sendRealtimeInput({ media: pcmBlob });
-                  } catch (err) {
-                    console.warn("Input stream failed:", err);
-                  }
-                }
-              }).catch(() => {});
+              try {
+                sessionRef.current.sendRealtimeInput({ media: pcmBlob });
+              } catch (err) {
+                console.warn("Input drop.");
+              }
             };
             
             source.connect(scriptProcessor);
@@ -180,7 +180,7 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
                 nextStartTimeRef.current += audioBuffer.duration;
                 sourcesRef.current.add(source);
               } catch (e) {
-                console.warn("Audio error:", e);
+                console.warn("Audio error.");
               }
             }
 
@@ -191,8 +191,7 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
             }
           },
           onerror: (e) => {
-            console.error("WebSocket Error:", e);
-            setError("Connection lost. Tap 'Start Talking' to reconnect.");
+            setError("Network failure. Try again.");
             stopChat();
           },
           onclose: () => stopChat()
@@ -204,16 +203,13 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice } }
           },
-          systemInstruction: `You are a warm English companion. Be very concise and quick to reply. 
-          Use simple language. Short responses only. 
-          Do not repeat the user's input. Act as a real conversational partner.`
+          systemInstruction: `Brief English partner. 1-sentence fast replies only. No repetition.`
         }
       });
       
       sessionRef.current = await sessionPromise;
     } catch (err) {
-      console.error("Init Error:", err);
-      setError("Please check microphone permissions and internet.");
+      setError("Failed to start chat.");
       setIsConnecting(false);
     }
   };
@@ -229,12 +225,12 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
         </button>
         <div className="text-right">
           <h3 className="text-xl font-black text-slate-900 tracking-tight uppercase">Casual Practice</h3>
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Natural Partner</p>
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Fast Chat</p>
         </div>
       </div>
 
       <div className="bg-white rounded-[2rem] shadow-xl border border-slate-100 overflow-hidden min-h-[550px] flex flex-col">
-        {isActive ? (
+        {isActiveState ? (
           <div className="flex-1 flex flex-col p-8 space-y-6">
             <div className="flex justify-between items-center pb-6 border-b border-slate-50">
               <div className="flex items-center space-x-3">
@@ -254,7 +250,7 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
               ))}
               {transcriptions.length === 0 && (
                 <div className="text-center py-20 text-slate-300">
-                  <p className="text-sm font-bold uppercase tracking-widest">Start speaking to your partner...</p>
+                  <p className="text-sm font-bold uppercase tracking-widest">Start speaking...</p>
                 </div>
               )}
             </div>
@@ -277,7 +273,7 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
             </div>
             <div className="space-y-4 w-full max-w-sm">
               <h3 className="text-3xl font-black text-slate-900 tracking-tight uppercase">Casual Conversation</h3>
-              <p className="text-slate-500 text-sm font-medium leading-relaxed">Choose a friendly partner to practice your English fluency without any exam pressure.</p>
+              <p className="text-slate-500 text-sm font-medium leading-relaxed">Fast, natural practice. No delay.</p>
               <div className="grid grid-cols-1 gap-2.5 pt-4">
                 {VOICES.map((v) => (
                   <button key={v.name} onClick={() => setSelectedVoice(v.name)} className={`p-4 rounded-2xl border-2 transition-all ${selectedVoice === v.name ? 'border-sky-600 bg-sky-50 shadow-md' : 'border-slate-100 bg-white hover:border-slate-200'}`}>
@@ -295,7 +291,7 @@ const GeneralChatModule: React.FC<GeneralChatModuleProps> = ({ onBack }) => {
             )}
 
             <button onClick={startChat} disabled={isConnecting} className="px-12 py-5 bg-sky-600 text-white rounded-[1.5rem] font-black text-xl shadow-2xl hover:bg-sky-700 transition-all flex items-center space-x-4 active:scale-95 disabled:opacity-50">
-              {isConnecting ? <span>CONNECTING...</span> : <span>START TALKING</span>}
+              {isConnecting ? <span>Connecting...</span> : <span>START TALKING</span>}
             </button>
           </div>
         )}
